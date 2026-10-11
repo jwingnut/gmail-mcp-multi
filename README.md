@@ -1,175 +1,40 @@
-# gmail-mcp-multi
+# gmail-mcp-multi (fork): read mail and create drafts, cannot send
 
-A Gmail MCP server with native multi-account support. Manage multiple Gmail accounts from a single server instance.
+Fork of [dmorrill/gmail-mcp-multi](https://github.com/dmorrill/gmail-mcp-multi), reworked so an AI agent can
+search and read several Gmail accounts and save drafts (with attachments), but **cannot send mail**.
 
-Unlike other Gmail MCPs that require running separate server instances per account, this one lets you specify which account to use on each tool call—making it easy to manage personal and work inboxes from Claude Code, Cursor, or any MCP client.
+## Safety model
 
-## Features
+- **No send code.** There is no send tool and no `messages.send` / `drafts.send` call anywhere. `npm test`
+  greps the built `dist/` and `src/` and fails if either appears.
+- **Scopes:** `gmail.readonly` + `gmail.compose` only. Compose is the minimum Google offers for drafts and
+  technically allows sending, which is why the ban is in code. Tokens with any other scope are refused at load.
+- **Mail is untrusted.** Tool output is wrapped in an untrusted-content banner, URLs are reduced to `[link: host]`
+  (paths and query strings such as reset tokens are dropped), and attachments are saved only into a quarantine
+  folder and never opened.
+- **Secrets** live in `secrets/` inside the project (git-ignored, owner-only permissions; on Windows the ACL is
+  reduced to the current user). They are never logged or echoed; error text is scrubbed of token patterns.
+- Attachments for drafts must be absolute paths, at most 20 MB, and cannot come from `secrets/`, `.ssh`, `.aws`, etc.
+- `--readonly` (or `GMAIL_MCP_READONLY=1`) also removes the draft tools.
 
-- **Multi-account support** - Single server instance, unlimited Gmail accounts
-- **Account aliases** - Use friendly names like "work" or "personal" instead of email addresses
-- **Full Gmail API** - Search, read, send, label, and manage emails
-- **Batch operations** - Bulk modify or delete emails efficiently
-- **Auto token refresh** - Handles OAuth token refresh automatically
+## Setup
 
-## Installation
-
-```bash
-npm install -g gmail-mcp-multi
-```
-
-Or run directly with npx:
-```bash
-npx gmail-mcp-multi
-```
-
-## Quick Start
-
-### 1. Set up Google Cloud OAuth
-
-You'll need OAuth credentials from Google Cloud Console:
-
-1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Create a new project (or use existing)
-3. Enable the Gmail API
-4. Create OAuth 2.0 credentials (Desktop app type)
-5. Download the credentials JSON
-
-### 2. Configure the MCP
-
-Create `~/.gmail-mcp/oauth-keys.json` with your OAuth credentials.
-
-### 3. Add to your MCP client
-
-**Claude Code (`~/.claude/settings.json`):**
-```json
-{
-  "mcpServers": {
-    "gmail": {
-      "command": "npx",
-      "args": ["gmail-mcp-multi"]
-    }
-  }
-}
-```
-
-#### Read-only mode
-
-Pass `--readonly` (or set `GMAIL_MCP_READONLY=1`) to disable every mutating
-tool — `send_email`, `modify_email`, and any future delete/label-edit tools.
-Only search/read/list operations remain available, both in the advertised tool
-list and at dispatch time. Useful when handing the server to an autonomous
-agent:
-
-```json
-{
-  "mcpServers": {
-    "gmail-readonly": {
-      "command": "npx",
-      "args": ["gmail-mcp-multi", "--readonly"]
-    }
-  }
-}
-```
-
-### 4. Authenticate accounts
-
-Authentication runs as a one-off Node script (it needs to open a browser and
-listen on a localhost port, which doesn't fit inside an MCP request). After
-`npm run build`, from the project checkout:
-
-```bash
-node dist/auth.js personal you@gmail.com
-node dist/auth.js work you@company.com
-```
-
-Each invocation prints a Google authorization URL, listens on
-`http://127.0.0.1:<random-port>` for the redirect, exchanges the code for
-tokens, and writes them to `~/.gmail-mcp/accounts/<alias>/credentials.json`.
-
-The script requests the `gmail.readonly` scope, so the resulting tokens
-can never mutate the mailbox even if the MCP server is later started
-without `--readonly`.
-
-For multi-org setups (accounts in different Google Workspace
-organizations), drop a per-account `oauth-keys.json` into
-`~/.gmail-mcp/accounts/<alias>/` before running the script — see
-"Configuration" below.
-
-### 5. Use it!
-
-```
-search_emails({ account: "work", query: "in:inbox is:unread" })
-search_emails({ account: "personal", query: "from:mom" })
-```
+1. `npm install && npm run build`
+2. Google Cloud console: enable the Gmail API, add scopes `gmail.readonly` and `gmail.compose`, publish the app
+   ("In production", so tokens do not expire weekly), create an OAuth client of type **Desktop app**, download its
+   JSON and save it as `secrets/oauth-keys.json`. One client serves every account.
+3. For each mailbox: `node dist/auth.js <alias> <email>`. Open the printed URL, sign in as that account, allow
+   access. The script aborts if you sign in as a different account than `<email>`.
+4. Register `node <path>/dist/index.js` as a stdio MCP server in your client.
 
 ## Tools
 
-All tools that interact with Gmail require an `account` parameter (alias or email).
+`list_accounts`, `authenticate` (instructions only), `search_emails`, `read_email`, `list_labels`,
+`download_attachment` (to quarantine), `create_draft`, `update_draft`. Every tool except `list_accounts` takes an
+`account` (alias or email address).
 
-> Tools that mutate the mailbox (send, modify, delete, label edits) are filtered out when the server is started with `--readonly`.
+## Upstream PRs
 
-### Account Management
-| Tool | Description |
-|------|-------------|
-| `list_accounts` | List all configured accounts and auth status |
-| `authenticate` | Add or re-authenticate an account |
-
-### Email Operations
-| Tool | Description |
-|------|-------------|
-| `search_emails` | Search emails using Gmail query syntax |
-| `read_email` | Get full content of an email by ID |
-| `send_email` | Send a new email |
-| `draft_email` | Create a draft |
-| `modify_email` | Add/remove labels, mark read/unread |
-| `delete_email` | Trash or permanently delete |
-| `batch_modify_emails` | Bulk label operations |
-| `batch_delete_emails` | Bulk delete |
-
-### Label Management
-| Tool | Description |
-|------|-------------|
-| `list_labels` | Get all labels for an account |
-| `create_label` | Create a new label |
-| `delete_label` | Delete a label |
-
-## Configuration
-
-Credentials are stored in `~/.gmail-mcp/`:
-
-```
-~/.gmail-mcp/
-├── config.json           # Account aliases and settings
-├── oauth-keys.json       # Default Google OAuth app credentials
-└── accounts/
-    ├── work/
-    │   ├── oauth-keys.json    # Optional: per-account OAuth client
-    │   └── credentials.json
-    └── personal/
-        └── credentials.json
-```
-
-For each account, `oauth-keys.json` is looked up first in the account
-directory and falls back to the top-level `~/.gmail-mcp/oauth-keys.json`.
-This lets you mix accounts that belong to different Google Cloud
-projects or Workspace organizations — useful when one organization's
-admin won't whitelist a third-party OAuth client owned by another.
-
-## Development
-
-```bash
-git clone https://github.com/dmorrill/gmail-mcp-multi.git
-cd gmail-mcp-multi
-npm install
-npm run build
-npm run dev
-```
-
-## Contributing
-
-Contributions welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-## License
-
-MIT
+Merged: #15 (owner-only credential permissions), #13 (per-account OAuth keys, standalone auth script,
+`--readonly`). Not merged (they add or enable sending, or filter creation which can auto-forward mail):
+#7, #9, #10, #11, #14. See `docs/PR-REVIEW.md`.
