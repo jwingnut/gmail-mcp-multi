@@ -1,6 +1,8 @@
 import * as fs from "fs";
 import * as path from "path";
-import * as os from "os";
+import { ensureSecureDir, homeDir, writeSecureFile } from "./secure.js";
+
+export { writeSecureFile } from "./secure.js";
 
 export interface Account {
   alias: string;
@@ -17,68 +19,52 @@ interface Config {
   accounts: AccountConfig[];
 }
 
-const CONFIG_DIR = path.join(os.homedir(), ".gmail-mcp");
-const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
-const ACCOUNTS_DIR = path.join(CONFIG_DIR, "accounts");
+const ALIAS_RE = /^[A-Za-z0-9_-]{1,32}$/;
 
-/** Owner-only permissions for anything holding OAuth material. */
-const DIR_MODE = 0o700;
-const FILE_MODE = 0o600;
-
-/**
- * Write a file that only the owner can read.
- *
- * The `mode` option is applied by the OS only when the file is created, so an
- * explicit chmod follows to also tighten files written by earlier versions.
- */
-export function writeSecureFile(filePath: string, data: string): void {
-  fs.writeFileSync(filePath, data, { mode: FILE_MODE });
-  fs.chmodSync(filePath, FILE_MODE);
-}
-
-/**
- * Create a directory only the owner can enter.
- *
- * `mode` is honoured only on creation, so directories left behind by earlier
- * versions (created world-readable) are tightened on every startup.
- */
-function ensureSecureDir(dirPath: string): void {
-  if (!fs.existsSync(dirPath)) {
-    fs.mkdirSync(dirPath, { recursive: true, mode: DIR_MODE });
+/** Alias is used as a directory name, so it must be a plain token. */
+export function assertAlias(alias: string): void {
+  if (!ALIAS_RE.test(alias)) {
+    throw new Error("Alias must be 1-32 characters: letters, digits, '-' or '_'");
   }
-  fs.chmodSync(dirPath, DIR_MODE);
 }
 
 export class AccountManager {
   private config: Config = { accounts: [] };
+  private readonly configDir: string;
+  private readonly configFile: string;
+  private readonly accountsDir: string;
 
   constructor() {
-    this.ensureDirectories();
+    this.configDir = homeDir();
+    this.configFile = path.join(this.configDir, "config.json");
+    this.accountsDir = path.join(this.configDir, "accounts");
+    ensureSecureDir(this.configDir);
+    ensureSecureDir(this.accountsDir);
     this.loadConfig();
   }
 
-  private ensureDirectories(): void {
-    ensureSecureDir(CONFIG_DIR);
-    ensureSecureDir(ACCOUNTS_DIR);
-  }
-
   private loadConfig(): void {
-    if (fs.existsSync(CONFIG_FILE)) {
-      const content = fs.readFileSync(CONFIG_FILE, "utf-8");
-      this.config = JSON.parse(content);
+    if (fs.existsSync(this.configFile)) {
+      this.config = JSON.parse(fs.readFileSync(this.configFile, "utf-8"));
     }
   }
 
   private saveConfig(): void {
-    writeSecureFile(CONFIG_FILE, JSON.stringify(this.config, null, 2));
+    writeSecureFile(this.configFile, JSON.stringify(this.config, null, 2));
   }
 
   getAccountDir(alias: string): string {
-    return path.join(ACCOUNTS_DIR, alias);
+    assertAlias(alias);
+    return path.join(this.accountsDir, alias);
   }
 
   getCredentialsPath(alias: string): string {
     return path.join(this.getAccountDir(alias), "credentials.json");
+  }
+
+  getQuarantineDir(alias: string): string {
+    assertAlias(alias);
+    return path.join(this.configDir, "quarantine", alias);
   }
 
   isAuthenticated(alias: string): boolean {
@@ -93,50 +79,30 @@ export class AccountManager {
   }
 
   getAccount(aliasOrEmail: string): AccountConfig | undefined {
+    const needle = aliasOrEmail.toLowerCase();
     return this.config.accounts.find(
-      (acc) => acc.alias === aliasOrEmail || acc.email === aliasOrEmail
+      (acc) => acc.alias.toLowerCase() === needle || acc.email.toLowerCase() === needle
     );
   }
 
   addAccount(alias: string, email: string): void {
-    const existing = this.config.accounts.findIndex(
-      (acc) => acc.alias === alias
-    );
+    assertAlias(alias);
+    const existing = this.config.accounts.findIndex((acc) => acc.alias === alias);
     if (existing >= 0) {
       this.config.accounts[existing] = { alias, email };
     } else {
       this.config.accounts.push({ alias, email });
     }
-
-    // Create account directory
     ensureSecureDir(this.getAccountDir(alias));
-
     this.saveConfig();
   }
 
-  removeAccount(alias: string): boolean {
-    const index = this.config.accounts.findIndex((acc) => acc.alias === alias);
-    if (index >= 0) {
-      this.config.accounts.splice(index, 1);
-      this.saveConfig();
-
-      // Remove credentials
-      const accountDir = this.getAccountDir(alias);
-      if (fs.existsSync(accountDir)) {
-        fs.rmSync(accountDir, { recursive: true });
-      }
-      return true;
-    }
-    return false;
-  }
-
+  /** One OAuth client (Desktop app) for all accounts, or a per-account override. */
   getOAuthKeysPath(alias?: string): string {
     if (alias) {
       const perAccount = path.join(this.getAccountDir(alias), "oauth-keys.json");
-      if (fs.existsSync(perAccount)) {
-        return perAccount;
-      }
+      if (fs.existsSync(perAccount)) return perAccount;
     }
-    return path.join(CONFIG_DIR, "oauth-keys.json");
+    return path.join(this.configDir, "oauth-keys.json");
   }
 }

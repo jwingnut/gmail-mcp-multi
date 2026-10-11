@@ -29,3 +29,7 @@ coverage/
 # Environment
 .env
 .env.local
+
+# Local secrets, quarantined attachments, test build
+secrets/
+.test-build/

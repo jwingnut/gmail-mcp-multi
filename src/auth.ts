@@ -5,9 +5,12 @@ import * as fs from "fs";
 import * as http from "http";
 import { AddressInfo } from "net";
 import { URL } from "url";
-import { AccountManager } from "./accounts.js";
+import { randomBytes } from "crypto";
+import { AccountManager, writeSecureFile } from "./accounts.js";
+import { ALLOWED_SCOPES } from "./gmail.js";
 
-const SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"];
+// readonly to read mail, compose to create drafts. Nothing broader is ever requested.
+const SCOPES = ALLOWED_SCOPES;
 
 function usage(): never {
   console.error("Usage: node dist/auth.js <alias> <email>");
@@ -54,21 +57,15 @@ async function main() {
     throw new Error("Could not determine authenticated email address");
   }
   if (actualEmail.toLowerCase() !== email.toLowerCase()) {
-    console.error(
-      `Warning: signed in as ${actualEmail}, but you asked for ${email}.`
-    );
-    console.error(
-      "Storing the actual signed-in address. Re-run if this is not what you wanted."
-    );
-    accountManager.addAccount(alias, actualEmail);
+    console.error(`Signed in as ${actualEmail}, but alias '${alias}' was requested for ${email}. Nothing saved; re-run and pick the right account.`);
+    process.exit(1);
   }
 
   const credPath = accountManager.getCredentialsPath(alias);
-  fs.writeFileSync(credPath, JSON.stringify(tokens, null, 2));
-  fs.chmodSync(credPath, 0o600);
+  writeSecureFile(credPath, JSON.stringify(tokens, null, 2));
 
   console.error(`Authenticated ${actualEmail} as alias '${alias}'.`);
-  console.error(`Credentials written to ${credPath}`);
+  console.error("Credentials saved to the secrets folder.");
 }
 
 function runFlow(
@@ -80,6 +77,7 @@ function runFlow(
 
     server.on("error", reject);
 
+    const state = randomBytes(16).toString("hex");
     server.listen(0, "127.0.0.1", () => {
       const port = (server.address() as AddressInfo).port;
       const redirectUri = `http://127.0.0.1:${port}`;
@@ -95,6 +93,7 @@ function runFlow(
         prompt: "consent",
         scope: SCOPES,
         login_hint: loginHint,
+        state,
       });
 
       console.error("Open this URL in a browser to authorize:");
@@ -108,6 +107,11 @@ function runFlow(
           const reqUrl = new URL(req.url || "/", redirectUri);
           const code = reqUrl.searchParams.get("code");
           const error = reqUrl.searchParams.get("error");
+          if (reqUrl.searchParams.get("state") !== state) {
+            res.writeHead(400, { "Content-Type": "text/plain" });
+            res.end("State mismatch.");
+            return;
+          }
 
           if (error) {
             res.writeHead(400, { "Content-Type": "text/plain" });
