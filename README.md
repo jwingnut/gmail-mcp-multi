@@ -14,17 +14,14 @@ Unlike other Gmail MCPs that require running separate server instances per accou
 
 ## Installation
 
-This package is not published to npm yet, so install it from source:
-
 ```bash
-git clone https://github.com/dmorrill/gmail-mcp-multi.git
-cd gmail-mcp-multi
-npm install
-npm run build
+npm install -g gmail-mcp-multi
 ```
 
-That produces `dist/index.js`, which is the server entry point your MCP client
-runs. Note the absolute path to it — you'll need it below.
+Or run directly with npx:
+```bash
+npx gmail-mcp-multi
+```
 
 ## Quick Start
 
@@ -44,34 +41,60 @@ Create `~/.gmail-mcp/oauth-keys.json` with your OAuth credentials.
 
 ### 3. Add to your MCP client
 
-**Claude Code:**
-```bash
-claude mcp add gmail -- node /absolute/path/to/gmail-mcp-multi/dist/index.js
-```
-
-**Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json`
-on macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows):
+**Claude Code (`~/.claude/settings.json`):**
 ```json
 {
   "mcpServers": {
     "gmail": {
-      "command": "/usr/local/bin/node",
-      "args": ["/absolute/path/to/gmail-mcp-multi/dist/index.js"]
+      "command": "npx",
+      "args": ["gmail-mcp-multi"]
     }
   }
 }
 ```
 
-Both paths must be absolute. Claude Desktop in particular launches servers with a
-minimal `PATH`, so a bare `node` may not resolve — use the output of `which node`.
+#### Read-only mode
+
+Pass `--readonly` (or set `GMAIL_MCP_READONLY=1`) to disable every mutating
+tool — `send_email`, `modify_email`, and any future delete/label-edit tools.
+Only search/read/list operations remain available, both in the advertised tool
+list and at dispatch time. Useful when handing the server to an autonomous
+agent:
+
+```json
+{
+  "mcpServers": {
+    "gmail-readonly": {
+      "command": "npx",
+      "args": ["gmail-mcp-multi", "--readonly"]
+    }
+  }
+}
+```
 
 ### 4. Authenticate accounts
 
-Once the MCP is running, use the `authenticate` tool:
+Authentication runs as a one-off Node script (it needs to open a browser and
+listen on a localhost port, which doesn't fit inside an MCP request). After
+`npm run build`, from the project checkout:
+
+```bash
+node dist/auth.js personal you@gmail.com
+node dist/auth.js work you@company.com
 ```
-authenticate({ alias: "work", email: "you@company.com" })
-authenticate({ alias: "personal", email: "you@gmail.com" })
-```
+
+Each invocation prints a Google authorization URL, listens on
+`http://127.0.0.1:<random-port>` for the redirect, exchanges the code for
+tokens, and writes them to `~/.gmail-mcp/accounts/<alias>/credentials.json`.
+
+The script requests the `gmail.readonly` scope, so the resulting tokens
+can never mutate the mailbox even if the MCP server is later started
+without `--readonly`.
+
+For multi-org setups (accounts in different Google Workspace
+organizations), drop a per-account `oauth-keys.json` into
+`~/.gmail-mcp/accounts/<alias>/` before running the script — see
+"Configuration" below.
 
 ### 5. Use it!
 
@@ -83,6 +106,8 @@ search_emails({ account: "personal", query: "from:mom" })
 ## Tools
 
 All tools that interact with Gmail require an `account` parameter (alias or email).
+
+> Tools that mutate the mailbox (send, modify, delete, label edits) are filtered out when the server is started with `--readonly`.
 
 ### Account Management
 | Tool | Description |
@@ -116,18 +141,20 @@ Credentials are stored in `~/.gmail-mcp/`:
 ```
 ~/.gmail-mcp/
 ├── config.json           # Account aliases and settings
-├── oauth-keys.json       # Your Google OAuth app credentials
+├── oauth-keys.json       # Default Google OAuth app credentials
 └── accounts/
     ├── work/
+    │   ├── oauth-keys.json    # Optional: per-account OAuth client
     │   └── credentials.json
     └── personal/
         └── credentials.json
 ```
 
-These files hold OAuth refresh tokens that grant ongoing access to your mailboxes.
-The server creates its directories as `0700` and its credential files as `0600`, and
-re-applies those permissions on startup to tighten anything left behind by an earlier
-version. Never commit them or place them on a shared filesystem.
+For each account, `oauth-keys.json` is looked up first in the account
+directory and falls back to the top-level `~/.gmail-mcp/oauth-keys.json`.
+This lets you mix accounts that belong to different Google Cloud
+projects or Workspace organizations — useful when one organization's
+admin won't whitelist a third-party OAuth client owned by another.
 
 ## Development
 
