@@ -210,13 +210,22 @@ test("built code and source contain no send call or send scope", () => {
   assert.deepEqual(hits, []);
 });
 
-test("doctor reports days until Testing-token expiry and flags failures", async () => {
+function setPublishing(status?: string) {
+  const f = path.join(HOME, "config.json");
+  const cfg = JSON.parse(fs.readFileSync(f, "utf-8"));
+  if (status) cfg.publishingStatus = status;
+  else delete cfg.publishingStatus;
+  fs.writeFileSync(f, JSON.stringify(cfg));
+}
+
+test("doctor (Testing flag) reports days until token expiry and flags failures", async () => {
   const { am, mocks } = setup();
+  setPublishing("testing");
   const now = new Date("2026-10-17T00:00:00Z");
   const meta = (alias: string, iso: string) =>
     fs.writeFileSync(path.join(path.dirname(am.getCredentialsPath(alias)), "meta.json"), JSON.stringify({ consented_at: iso }));
   meta("wing", "2026-10-16T00:00:00Z"); // 6 days left
-  meta("jp", "2026-10-14T12:00:00Z"); // 4.5 days used -> 2.5 left... use stricter case below
+  meta("jp", "2026-10-14T12:00:00Z"); // 4.5 days left
   assert.equal(daysLeft("2026-10-11T00:00:00Z", now), 1);
   const provider = { getClient: async (a: string) => mocks[a].api };
   const r = await checkAccounts(am, { live: true, provider, now });
@@ -227,5 +236,19 @@ test("doctor reports days until Testing-token expiry and flags failures", async 
   assert.equal((await checkAccounts(am, { live: false, now })).find((x) => x.alias === "jp")!.status, "expired");
   const failing = { getClient: async () => { throw new Error("invalid_grant"); } };
   assert.equal((await checkAccounts(am, { live: true, provider: failing, now }))[0].status, "expired");
-  assert.ok(mocks.wing.calls.every((c) => !/send/.test(c.fn)));
+  setPublishing();
+});
+
+test("doctor in production ignores token age and uses the live call only", async () => {
+  const { am, mocks } = setup();
+  setPublishing(); // default: production
+  const now = new Date("2026-12-31T00:00:00Z");
+  fs.writeFileSync(path.join(path.dirname(am.getCredentialsPath("wing")), "meta.json"), JSON.stringify({ consented_at: "2026-10-01T00:00:00Z" }));
+  const provider = { getClient: async (a: string) => mocks[a].api };
+  const ok = await checkAccounts(am, { live: true, provider, now });
+  assert.ok(ok.every((x) => x.status === "ok" && x.daysLeft === undefined && /live Gmail call ok/.test(x.detail)));
+  assert.ok(mocks.wing.calls.some((c) => c.fn === "getProfile"));
+  assert.ok((await checkAccounts(am, { live: false, now })).every((x) => x.status === "unknown"));
+  const failing = { getClient: async () => { throw new Error("invalid_grant"); } };
+  assert.ok((await checkAccounts(am, { live: true, provider: failing, now })).every((x) => x.status === "expired"));
 });
