@@ -2,6 +2,7 @@
 
 import { google, Auth } from "googleapis";
 import * as fs from "fs";
+import * as path from "path";
 import * as http from "http";
 import { AddressInfo } from "net";
 import { URL } from "url";
@@ -63,6 +64,11 @@ async function main() {
 
   const credPath = accountManager.getCredentialsPath(alias);
   writeSecureFile(credPath, JSON.stringify(tokens, null, 2));
+  // Testing-mode refresh tokens die after 7 days; remember when this one was issued (see doctor).
+  writeSecureFile(
+    path.join(path.dirname(credPath), "meta.json"),
+    JSON.stringify({ consented_at: new Date().toISOString() }, null, 2)
+  );
 
   console.error(`Authenticated ${actualEmail} as alias '${alias}'.`);
   console.error("Credentials saved to the secrets folder.");

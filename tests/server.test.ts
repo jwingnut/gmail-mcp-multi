@@ -11,6 +11,7 @@ process.env.GMAIL_MCP_HOME = HOME;
 import { AccountManager } from "../src/accounts.js";
 import { GmailClient, assertScopes } from "../src/gmail.js";
 import { getTools, handleToolCall } from "../src/tools/index.js";
+import { checkAccounts, daysLeft } from "../src/health.js";
 
 const b64 = (s: string) => Buffer.from(s).toString("base64url");
 
@@ -26,6 +27,7 @@ function mockGmail(label: string) {
   };
   const api = {
     users: {
+      getProfile: rec("getProfile", { emailAddress: `${label}@gmail.com` }),
       messages: {
         list: rec("messages.list", { messages: [{ id: "m1", threadId: "t1" }] }),
         get: rec("messages.get", (arg: any) => ({
@@ -206,4 +208,24 @@ test("built code and source contain no send call or send scope", () => {
     for (const re of banned) if (re.test(body)) hits.push(`${path.relative(root, f)} ~ ${re}`);
   }
   assert.deepEqual(hits, []);
+});
+
+test("doctor reports days until Testing-token expiry and flags failures", async () => {
+  const { am, mocks } = setup();
+  const now = new Date("2026-10-17T00:00:00Z");
+  const meta = (alias: string, iso: string) =>
+    fs.writeFileSync(path.join(path.dirname(am.getCredentialsPath(alias)), "meta.json"), JSON.stringify({ consented_at: iso }));
+  meta("wing", "2026-10-16T00:00:00Z"); // 6 days left
+  meta("jp", "2026-10-14T12:00:00Z"); // 4.5 days used -> 2.5 left... use stricter case below
+  assert.equal(daysLeft("2026-10-11T00:00:00Z", now), 1);
+  const provider = { getClient: async (a: string) => mocks[a].api };
+  const r = await checkAccounts(am, { live: true, provider, now });
+  assert.deepEqual(r.map((x) => x.status), ["ok", "ok"]);
+  meta("jp", "2026-10-11T00:00:00Z"); // 1 day left -> warn
+  assert.equal((await checkAccounts(am, { live: false, now })).find((x) => x.alias === "jp")!.status, "warn");
+  meta("jp", "2026-10-09T00:00:00Z"); // past limit -> expired
+  assert.equal((await checkAccounts(am, { live: false, now })).find((x) => x.alias === "jp")!.status, "expired");
+  const failing = { getClient: async () => { throw new Error("invalid_grant"); } };
+  assert.equal((await checkAccounts(am, { live: true, provider: failing, now }))[0].status, "expired");
+  assert.ok(mocks.wing.calls.every((c) => !/send/.test(c.fn)));
 });
