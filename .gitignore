@@ -33,3 +33,6 @@ coverage/
 # Local secrets, quarantined attachments, test build
 secrets/
 .test-build/
+
+# Agent tooling
+.serena/

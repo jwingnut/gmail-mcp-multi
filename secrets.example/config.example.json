@@ -1,0 +1,6 @@
+{
+  "accounts": [
+    { "alias": "personal", "email": "you@gmail.com" }
+  ],
+  "publishingStatus": "production"
+}
