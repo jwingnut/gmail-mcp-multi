@@ -60,6 +60,19 @@ function mockGmail(label: string) {
       drafts: {
         create: rec("drafts.create", { id: "d1" }),
         update: rec("drafts.update", { id: "d1" }),
+        get: rec("drafts.get", {
+          id: "d1",
+          message: {
+            payload: {
+              mimeType: "text/plain",
+              headers: [
+                { name: "To", value: "a@example.com" },
+                { name: "Subject", value: "Draft subject" },
+              ],
+              body: { data: b64("Draft body, see https://x.example.com/p?t=1") },
+            },
+          },
+        }),
         send: trap("drafts.send"),
       },
       labels: { list: rec("labels.list", { labels: [{ id: "INBOX", name: "INBOX" }] }) },
@@ -170,13 +183,23 @@ test("attachments from the credentials folder or relative paths are refused", as
 test("--readonly hides draft tools", async () => {
   const { call } = setup();
   assert.ok(getTools(false).some((t) => t.name === "create_draft"));
-  assert.ok(!getTools(true).some((t) => /draft/.test(t.name)));
+  assert.ok(!getTools(true).some((t) => ["create_draft", "update_draft", "send_draft"].includes(t.name)));
+  assert.ok(getTools(true).some((t) => t.name === "get_draft"), "reading a draft stays available");
   const r = await call("create_draft", { account: "wing", subject: "S", body: "B" }, true);
   assert.match(r.content[0].text, /disabled in --readonly/);
 });
 
-test("send ban: no send tool, runtime rejects it, scopes beyond compose refused", async () => {
+function setAllowSend(value?: unknown) {
+  const f = path.join(HOME, "config.json");
+  const cfg = JSON.parse(fs.readFileSync(f, "utf-8"));
+  if (value === undefined) delete cfg.allowSend;
+  else cfg.allowSend = value;
+  fs.writeFileSync(f, JSON.stringify(cfg));
+}
+
+test("send ban (default): no send tool, runtime rejects it, scopes beyond compose refused", async () => {
   const { mocks, call } = setup();
+  setAllowSend(); // default: key absent
   assert.ok(!getTools(false).some((t) => /send/i.test(t.name)));
   for (const n of ["send_email", "send_draft", "send"]) {
     const r = await call(n, { account: "wing", to: ["a@example.com"], subject: "S", body: "B" });
@@ -190,9 +213,63 @@ test("send ban: no send tool, runtime rejects it, scopes beyond compose refused"
   );
 });
 
-test("built code and source contain no send call or send scope", () => {
+test("send_draft stays unreachable unless allowSend is exactly the boolean true", async () => {
+  const { mocks, call } = setup();
+  for (const v of [undefined, false, "true", 1, null]) {
+    setAllowSend(v);
+    assert.ok(!getTools(false).some((t) => t.name === "send_draft"), `listed with allowSend=${String(v)}`);
+    const r = await call("send_draft", { account: "wing", draftId: "d1", userApproved: true });
+    assert.match(r.content[0].text, /Unknown tool/);
+  }
+  setAllowSend();
+  assert.ok(!mocks.wing.calls.some((c) => /send/.test(c.fn)), "drafts.send must never be called while off");
+});
+
+test("send_draft opt-in path (mocked API): approval text, userApproved interlock, audit log", async () => {
+  const { mocks, call } = setup();
+  try {
+    setAllowSend(true);
+    const tool = getTools(false).find((t) => t.name === "send_draft");
+    assert.ok(tool, "send_draft listed when allowSend is true");
+    assert.match(tool!.description!, /explicit approval/);
+    assert.match(tool!.description!, /show them the draft/);
+    // read back the draft first, as the description demands
+    const shown = (await call("get_draft", { account: "wing", draftId: "d1" })).content[0].text;
+    assert.match(shown, /Draft subject/);
+    assert.match(shown, /\[link: x\.example\.com\]/);
+    // without the interlock nothing is sent
+    const refused = await call("send_draft", { account: "wing", draftId: "d1" });
+    assert.match(refused.content[0].text, /userApproved must be true/);
+    assert.ok(!mocks.wing.calls.some((c) => /send/.test(c.fn)));
+    // approved: exactly one drafts.send call with the draft id, nothing else sends
+    (mocks.wing.api as any).users.drafts.send = async (arg: any) => {
+      mocks.wing.calls.push({ fn: "drafts.send", arg });
+      return { data: { id: "m9", threadId: "t9" } };
+    };
+    const ok = JSON.parse((await call("send_draft", { account: "wing", draftId: "d1", userApproved: true })).content[0].text);
+    assert.equal(ok.status, "SENT");
+    const sends = mocks.wing.calls.filter((c) => /send/.test(c.fn));
+    assert.equal(sends.length, 1);
+    assert.equal(sends[0].fn, "drafts.send");
+    assert.equal(sends[0].arg.requestBody.id, "d1");
+    assert.equal(mocks.jp.calls.filter((c) => /send/.test(c.fn)).length, 0);
+    const log = fs.readFileSync(path.join(HOME, "send-log.jsonl"), "utf-8").trim().split("\n").pop()!;
+    const entry = JSON.parse(log);
+    assert.equal(entry.draftId, "d1");
+    assert.doesNotMatch(log, /subject|body|@/i, "audit log holds no recipients, subject or body");
+    // --readonly still removes it
+    assert.ok(!getTools(true).some((t) => t.name === "send_draft"));
+  } finally {
+    setAllowSend();
+  }
+});
+
+test("built code and source: send code exists only in send.ts, nowhere else", () => {
   const root = path.resolve(__dirname, "..", "..");
+  // Banned everywhere: messages.send, generic .send(, bracket access, the send scope, a send_email tool, drafts.send.
   const banned = [/messages\s*\.\s*send/, /drafts\s*\.\s*send/, /\.send\s*\(/, /\[\s*["'`]send["'`]\s*\]/, /gmail\.send/, /send_email/];
+  // The one opt-in module may contain only drafts.send( (it is reachable only when allowSend is true).
+  const allowedInSendModule = [/drafts\s*\.\s*send/, /\.send\s*\(/];
   const scan = (dir: string): string[] =>
     fs.existsSync(dir)
       ? fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
@@ -203,11 +280,19 @@ test("built code and source contain no send call or send scope", () => {
   const files = [...scan(path.join(root, "dist")), ...scan(path.join(root, "src"))];
   assert.ok(files.length > 5, "expected built and source files");
   const hits: string[] = [];
+  const sendModules: string[] = [];
   for (const f of files) {
     const body = fs.readFileSync(f, "utf-8");
-    for (const re of banned) if (re.test(body)) hits.push(`${path.relative(root, f)} ~ ${re}`);
+    const isSendModule = /[\\/]send\.(js|ts)$/.test(f);
+    if (isSendModule && /drafts\s*\.\s*send\s*\(/.test(body)) sendModules.push(path.relative(root, f));
+    for (const re of banned) {
+      if (isSendModule && allowedInSendModule.some((a) => a.source === re.source)) continue;
+      if (re.test(body)) hits.push(`${path.relative(root, f)} ~ ${re}`);
+    }
   }
   assert.deepEqual(hits, []);
+  // drafts.send( appears only in the single send module (its source and compiled copy), and does appear there
+  assert.ok(sendModules.length >= 1 && sendModules.every((m) => /[\\/]send\.(js|ts)$/.test(m)), sendModules.join(", "));
 });
 
 function setPublishing(status?: string) {
