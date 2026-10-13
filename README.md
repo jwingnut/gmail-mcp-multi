@@ -50,7 +50,7 @@ Gmail filter creation (which can auto-forward mail).
    limit, but Google then requires a homepage and privacy policy URL to publish.
 3. For each mailbox: `node dist/auth.js <alias> <email>`. Open the printed URL, sign in as that account, allow
    access. The script aborts if you sign in as a different account than `<email>`.
-4. Register `node <path>/dist/index.js` as a stdio MCP server (see [`docs/REGISTRATION.md`](docs/REGISTRATION.md) for
+4. Register `node <path>/dist/index.js` as a stdio MCP server for ONE dedicated email agent per machine (see [`docs/REGISTRATION.md`](docs/REGISTRATION.md) for
    Claude Code, Codex and Pi).
 5. Check it: `npm run doctor`.
 
